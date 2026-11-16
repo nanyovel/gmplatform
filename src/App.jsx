@@ -51,6 +51,7 @@ const blank2 = () => ["", ""];
 const YES = /^(x|si|sí|true|1|verdadero|prioritario)$/i;
 const inp = "rounded border border-slate-300 bg-white px-3 py-1.5 text-sm";
 const MAX_PINS = 3; // máximo de almacenes que se pueden fijar a la vez
+const MAX_STORES = 5; // máximo de tiendas en "Exhibido en hasta"
 // Comparador para ordenar columnas: números por valor, textos alfabéticos (sin tildes ni mayúsculas, "2" antes que "10")
 const coll = new Intl.Collator("es", { numeric: true, sensitivity: "base" });
 const by = (x, y) => (typeof x === "number" ? x - y : coll.compare(x, y));
@@ -293,6 +294,7 @@ function Main({ user }) {
     [target, setTarget] = useState(""),
     [limit, setLimit] = useState(300);
   const [msg, setMsg] = useState("");
+  const [maxStores, setMaxStores] = useState(0); // No exhibido: "exhibido en hasta N tiendas" (0 = solo en los almacenes fijados)
   const [sort, setSort] = useState(null); // null = sin orden; { c: columna (índice en la fila), d: 1 asc | -1 desc }
 
   useEffect(() => {
@@ -328,8 +330,14 @@ function Main({ user }) {
   const shown = [...pins, ...(tgt ? [tgt] : opts)];
   const col = (h) => 3 + heads.indexOf(h);
   const vis = tab === "noex" ? pins : shown; // columnas de almacén visibles en la pestaña actual
+  const STORES = 3 + heads.length; // índice de la columna "Exhibido en" (solo existe en No exhibido)
   const sc =
-    sort && (sort.c < 3 || vis.some((h) => col(h) === sort.c)) ? sort.c : -1; // columna ordenada (solo si está visible)
+    sort &&
+    (sort.c < 3 ||
+      (tab === "noex" && sort.c === STORES) ||
+      vis.some((h) => col(h) === sort.c))
+      ? sort.c
+      : -1; // columna ordenada (solo si está visible)
   const sd = sort?.d;
   // Diccionario: nombre corto de cada localidad (se busca por el nombre original, sin tildes, mayúsculas ni asteriscos)
   const dmap = useMemo(
@@ -346,6 +354,7 @@ function Main({ user }) {
       .map((k) => dmap.get(k))
       .find(Boolean) ?? clean(h);
   const names = pins.map(lbl).join(", ");
+  const tiendas = maxStores === 1 ? "tienda" : "tiendas";
   const cats = useMemo(
     () =>
       [...new Set((data?.rows ?? []).map((r) => r[2]).filter(Boolean))].sort(),
@@ -391,26 +400,27 @@ function Main({ user }) {
     );
   }, [data, q, cat, tgt, pins, pmap, sc, sd]);
 
-  // No exhibido: artículos con existencia en alguno de los almacenes fijados y 0 o menos en todos los demás
+  // No exhibido: artículos con existencia en alguno de los almacenes fijados y en hasta maxStores tiendas (las demás localidades). st = tiendas con existencia
   const noex = useMemo(() => {
     if (!data || !pins.length) return [];
     const pis = pins.map((h) => heads.indexOf(h) + 3);
+    const sis = opts.map(col);
     const toks = norm(q).split(" ").filter(Boolean);
-    const out = data.rows.filter((r) => {
-      if (
-        !pis.some((i) => r[i] > 0) ||
-        r.some((v, i) => i >= 3 && !pis.includes(i) && v > 0)
-      )
-        return false;
-      if (cat && r[2] !== cat) return false;
+    const out = [];
+    for (const r of data.rows) {
+      if (!pis.some((i) => r[i] > 0)) continue;
+      const st = opts.filter((h, k) => r[sis[k]] > 0);
+      if (st.length > maxStores) continue;
+      if (cat && r[2] !== cat) continue;
       if (toks.length) {
         const t = norm(r[0] + " " + r[1]);
-        if (!toks.every((w) => t.includes(w))) return false;
+        if (!toks.every((w) => t.includes(w))) continue;
       }
-      return true;
-    });
-    return sc < 0 ? out : out.sort((a, b) => by(a[sc], b[sc]) * sd);
-  }, [data, pins, q, cat, sc, sd]);
+      out.push({ r, st });
+    }
+    const key = (x) => (sc === STORES ? x.st.length : x.r[sc]); // "Exhibido en" se ordena por cantidad de tiendas
+    return sc < 0 ? out : out.sort((a, b) => by(key(a), key(b)) * sd);
+  }, [data, pins, maxStores, q, cat, sc, sd]);
 
   const onFile = async (e) => {
     const f = e.target.files[0];
@@ -471,8 +481,14 @@ function Main({ user }) {
   const exportNoex = () =>
     download(
       "No exhibido",
-      ["Código", "Descripción", "Categoría", ...pins.map(lbl)],
-      noex.map((r) => [r[0], r[1], r[2], ...pins.map((h) => r[col(h)])]),
+      ["Código", "Descripción", "Categoría", ...pins.map(lbl), "Exhibido en"],
+      noex.map(({ r, st }) => [
+        r[0],
+        r[1],
+        r[2],
+        ...pins.map((h) => r[col(h)]),
+        st.map(lbl).join(" | "),
+      ]),
     );
 
   // Clic en un encabezado: sin orden → menor a mayor → mayor a menor → sin orden
@@ -628,6 +644,7 @@ function Main({ user }) {
             onClick={() => {
               setTab(k);
               setLimit(300);
+              if (k === "noex") setMaxStores(0);
             }}
             className={`px-4 py-2 text-sm ${tab === k ? "border-b-2 border-slate-900 font-semibold" : "text-slate-500"}`}
           >
@@ -680,7 +697,7 @@ function Main({ user }) {
                     setLimit(300);
                   }}
                   options={opts.map((h) => ({ value: h, label: lbl(h) }))}
-                  placeholder="Simplificar a existencia 0…"
+                  placeholder="Seleccione tienda"
                   disabled={!pins.length}
                   title={pins.length ? "" : "Fija un almacén primero"}
                 />
@@ -930,8 +947,28 @@ function Main({ user }) {
                     <option key={c}>{c}</option>
                   ))}
                 </select>
+                <label className="flex items-center gap-2 text-sm text-slate-600">
+                  Exhibido en hasta:
+                  <select
+                    className={inp}
+                    value={maxStores}
+                    onChange={(e) => {
+                      setMaxStores(Number(e.target.value));
+                      setLimit(300);
+                    }}
+                  >
+                    {Array.from({ length: MAX_STORES + 1 }, (_, n) => (
+                      <option key={n} value={n}>
+                        {n} {n === 1 ? "tienda" : "tiendas"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <span className="text-sm text-slate-500">
-                  {noex.length} ítems con existencia solo en {names}
+                  {noex.length} ítems con existencia{" "}
+                  {maxStores ? "en" : "solo en"} {names}
+                  {maxStores > 0 &&
+                    ` y exhibidos en hasta ${maxStores} ${tiendas}`}
                 </span>
                 <button
                   onClick={exportNoex}
@@ -943,7 +980,9 @@ function Main({ user }) {
               </div>
               {noex.length === 0 ? (
                 <p className="py-16 text-center text-slate-500">
-                  Ningún ítem tiene existencia únicamente en {names}
+                  {maxStores
+                    ? `Ningún ítem con existencia en ${names} está exhibido en hasta ${maxStores} ${tiendas}`
+                    : `Ningún ítem tiene existencia únicamente en ${names}`}
                   {(q || cat) && " con esos filtros"}.
                 </p>
               ) : (
@@ -971,10 +1010,13 @@ function Main({ user }) {
                             )}
                           </th>
                         ))}
+                        <th className="min-w-40 px-2 py-2 text-left align-bottom">
+                          {sortHead(STORES, "Exhibido en")}
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
-                      {noex.slice(0, limit).map((r, i) => (
+                      {noex.slice(0, limit).map(({ r, st }, i) => (
                         <tr key={i} className="odd:bg-white even:bg-slate-50">
                           <td className="px-2 py-1 font-mono">{r[0]}</td>
                           <td className="px-2 py-1">{r[1]}</td>
@@ -990,6 +1032,9 @@ function Main({ user }) {
                               </td>
                             );
                           })}
+                          <td className="px-2 py-1 text-slate-600">
+                            {st.map(lbl).join(" | ")}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
